@@ -1,0 +1,1918 @@
+import json
+import random
+import math
+import datetime
+import hashlib
+import requests
+import base64
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass, asdict
+from enum import Enum
+import sqlite3
+import matplotlib.pyplot as plt
+import numpy as np
+from abc import ABC, abstractmethod
+#import smtplib
+#from email.mime.text import MimeText
+#from email.mime.multipart import MimeMultipart
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import pandas as pd
+
+class DifficultyLevel(Enum):
+    BEGINNER = 1
+    ELEMENTARY = 2
+    INTERMEDIATE = 3
+    ADVANCED = 4
+    EXPERT = 5
+
+class TopicCategory(Enum):
+    ARITHMETIC = "arithmetic"
+    ALGEBRA = "algebra"
+    GEOMETRY = "geometry"
+    TRIGONOMETRY = "trigonometry"
+    CALCULUS = "calculus"
+    STATISTICS = "statistics"
+    PROBABILITY = "probability"
+
+@dataclass
+class StudentProfile:
+    name: str
+    current_grade: int
+    strengths: List[str]
+    weaknesses: List[str]
+    learning_speed: float
+    current_level: Dict[str, int]
+    total_problems_solved: int = 0
+    accuracy_rate: float = 0.0
+    last_session: Optional[str] = None
+    parent_email: Optional[str] = None
+    moodle_user_id: Optional[int] = None
+    created_at: str = None
+    updated_at: str = None
+
+@dataclass
+class ParentProfile:
+    id: int
+    name: str
+    email: str
+    password_hash: str
+    children_ids: List[int]
+    notification_preferences: Dict[str, bool]
+    created_at: str
+
+@dataclass
+class MathProblem:
+    id: str
+    topic: TopicCategory
+    grade_level: int
+    difficulty: DifficultyLevel
+    question: str
+    correct_answer: str
+    explanation: str
+    hints: List[str]
+    related_concepts: List[str]
+
+@dataclass
+class QuizResult:
+    topic: TopicCategory
+    score: float
+    time_taken: int
+    problems_attempted: int
+    mistakes: List[str]
+    timestamp: str
+    student_id: Optional[int] = None
+
+@dataclass
+class SessionReport:
+    student_id: int
+    date: str
+    duration_minutes: int
+    topics_covered: List[str]
+    problems_solved: int
+    accuracy_rate: float
+    difficulties_encountered: List[str]
+    improvements_noted: List[str]
+    next_recommendations: List[str]
+
+class MoodleIntegration:
+    """Handles integration with Moodle LMS"""
+
+    def __init__(self, moodle_url: str, api_token: str):
+        self.moodle_url = moodle_url.rstrip('/')
+        self.api_token = api_token
+        self.base_url = f"{self.moodle_url}/webservice/rest/server.php"
+
+    def make_request(self, function: str, params: Dict) -> Dict:
+        """Make API request to Moodle"""
+        data = {
+            'wstoken': self.api_token,
+            'wsfunction': function,
+            'moodlewsrestformat': 'json',
+            **params
+        }
+
+        try:
+            response = requests.post(self.base_url, data=data)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Moodle API Error: {e}")
+            return {}
+
+    def create_user(self, username: str, password: str, firstname: str, lastname: str, email: str) -> Optional[int]:
+        """Create user in Moodle"""
+        params = {
+            'users[0][username]': username,
+            'users[0][password]': password,
+            'users[0][firstname]': firstname,
+            'users[0][lastname]': lastname,
+            'users[0][email]': email,
+            'users[0][auth]': 'manual'
+        }
+
+        result = self.make_request('core_user_create_users', params)
+        if result and 'users' in result and len(result['users']) > 0:
+            return result['users'][0]['id']
+        return None
+
+    def enroll_user(self, user_id: int, course_id: int, role_id: int = 5):
+        """Enroll user in course (role_id 5 = student)"""
+        params = {
+            'enrolments[0][roleid]': role_id,
+            'enrolments[0][userid]': user_id,
+            'enrolments[0][courseid]': course_id
+        }
+
+        return self.make_request('enrol_manual_enrol_users', params)
+
+    def submit_grade(self, user_id: int, assignment_id: int, grade: float, feedback: str = ""):
+        """Submit grade to Moodle gradebook"""
+        params = {
+            'assignmentid': assignment_id,
+            'userid': user_id,
+            'grade': grade,
+            'plugindata[assignfeedbackcomments_editor][text]': feedback,
+            'plugindata[assignfeedbackcomments_editor][format]': 1
+        }
+
+        return self.make_request('mod_assign_save_grade', params)
+
+    def create_assignment_from_session(self, course_id: int, session_report: SessionReport) -> Dict:
+        """Create assignment in Moodle based on tutoring session"""
+        assignment_name = f"Math Practice - {session_report.date}"
+        description = f"""
+        <h3>Session Summary</h3>
+        <p><strong>Duration:</strong> {session_report.duration_minutes} minutes</p>
+        <p><strong>Topics Covered:</strong> {', '.join(session_report.topics_covered)}</p>
+        <p><strong>Problems Solved:</strong> {session_report.problems_solved}</p>
+        <p><strong>Accuracy Rate:</strong> {session_report.accuracy_rate:.1%}</p>
+
+        <h3>Areas for Improvement</h3>
+        <ul>
+        {''.join(f'<li>{difficulty}</li>' for difficulty in session_report.difficulties_encountered)}
+        </ul>
+
+        <h3>Next Session Recommendations</h3>
+        <ul>
+        {''.join(f'<li>{rec}</li>' for rec in session_report.next_recommendations)}
+        </ul>
+        """
+
+        params = {
+            'assignments[0][courseid]': course_id,
+            'assignments[0][name]': assignment_name,
+            'assignments[0][intro]': description,
+            'assignments[0][introformat]': 1,
+            'assignments[0][grade]': 100,
+            'assignments[0][duedate]': int((datetime.datetime.now() + datetime.timedelta(days=7)).timestamp())
+        }
+
+        return self.make_request('mod_assign_create_assignments', params)
+
+class NotificationSystem:
+    """Handles email notifications to parents"""
+
+    def __init__(self, smtp_server: str, smtp_port: int, email: str, password: str):
+        self.smtp_server = smtp_server
+        self.smtp_port = smtp_port
+        self.email = email
+        self.password = password
+
+    def send_email(self, to_email: str, subject: str, body: str, html_body: str = None):
+        """Send email notification"""
+        try:
+            msg = MimeMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = self.email
+            msg['To'] = to_email
+
+            # Add plain text part
+            text_part = MimeText(body, 'plain')
+            msg.attach(text_part)
+
+            # Add HTML part if provided
+            if html_body:
+                html_part = MimeText(html_body, 'html')
+                msg.attach(html_part)
+
+            # Send email
+            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
+                server.starttls()
+                server.login(self.email, self.password)
+                server.send_message(msg)
+
+            return True
+        except Exception as e:
+            print(f"Email sending failed: {e}")
+            return False
+
+    def send_progress_report(self, parent_email: str, student_name: str, session_report: SessionReport):
+        """Send progress report to parent"""
+        subject = f"Math Learning Progress Report - {student_name}"
+
+        body = f"""
+        Dear Parent,
+
+        Here's {student_name}'s latest math learning session report:
+
+        Session Date: {session_report.date}
+        Duration: {session_report.duration_minutes} minutes
+        Topics Covered: {', '.join(session_report.topics_covered)}
+        Problems Solved: {session_report.problems_solved}
+        Accuracy Rate: {session_report.accuracy_rate:.1%}
+
+        Areas that need attention:
+        {chr(10).join(f"• {item}" for item in session_report.difficulties_encountered)}
+
+        Recommendations for next session:
+        {chr(10).join(f"• {item}" for item in session_report.next_recommendations)}
+
+        Keep up the great work!
+
+        Best regards,
+        AI Math Tutor Team
+        """
+
+        html_body = f"""
+        <html>
+        <body>
+            <h2>Math Learning Progress Report - {student_name}</h2>
+            <div style="background-color: #f0f8ff; padding: 20px; border-radius: 10px;">
+                <h3>Session Summary</h3>
+                <ul>
+                    <li><strong>Date:</strong> {session_report.date}</li>
+                    <li><strong>Duration:</strong> {session_report.duration_minutes} minutes</li>
+                    <li><strong>Topics Covered:</strong> {', '.join(session_report.topics_covered)}</li>
+                    <li><strong>Problems Solved:</strong> {session_report.problems_solved}</li>
+                    <li><strong>Accuracy Rate:</strong> {session_report.accuracy_rate:.1%}</li>
+                </ul>
+            </div>
+
+            <div style="background-color: #fff5f5; padding: 20px; border-radius: 10px; margin-top: 20px;">
+                <h3>Areas for Improvement</h3>
+                <ul>
+                    {''.join(f"<li>{item}</li>" for item in session_report.difficulties_encountered)}
+                </ul>
+            </div>
+
+            <div style="background-color: #f0fff0; padding: 20px; border-radius: 10px; margin-top: 20px;">
+                <h3>Next Session Recommendations</h3>
+                <ul>
+                    {''.join(f"<li>{item}</li>" for item in session_report.next_recommendations)}
+                </ul>
+            </div>
+
+            <p style="margin-top: 30px;">Keep up the great work!</p>
+            <p><strong>AI Math Tutor Team</strong></p>
+        </body>
+        </html>
+        """
+        #save this to database in LMS and LMS will be used for sending the email.
+        #return self.send_email(parent_email, subject, body, html_body)
+
+class ParentDashboard:
+    """Parent dashboard for monitoring student progress"""
+
+    def __init__(self, db_manager):
+        self.db_manager = db_manager
+
+    def authenticate_parent(self, email: str, password: str) -> Optional[ParentProfile]:
+        """Authenticate parent login"""
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT id, name, email, password_hash, children_ids, notification_preferences, created_at
+            FROM parents WHERE email = ? AND password_hash = ?
+        """, (email, password_hash))
+
+        result = cursor.fetchone()
+        conn.close()
+
+        if result:
+            return ParentProfile(
+                id=result[0],
+                name=result[1],
+                email=result[2],
+                password_hash=result[3],
+                children_ids=json.loads(result[4]),
+                notification_preferences=json.loads(result[5]),
+                created_at=result[6]
+            )
+        return None
+
+    def register_parent(self, name: str, email: str, password: str) -> int:
+        """Register new parent"""
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+
+        now = datetime.datetime.now().isoformat()
+        default_notifications = {
+            "session_reports": True,
+            "weekly_summary": True,
+            "achievement_alerts": True
+        }
+
+        cursor.execute("""
+            INSERT INTO parents (name, email, password_hash, children_ids, notification_preferences, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (name, email, password_hash, json.dumps([]), json.dumps(default_notifications), now))
+
+        parent_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        return parent_id
+
+    def link_child_to_parent(self, parent_id: int, child_id: int):
+        """Link child to parent account"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+
+        # Get current children list
+        cursor.execute("SELECT children_ids FROM parents WHERE id = ?", (parent_id,))
+        result = cursor.fetchone()
+
+        if result:
+            children_ids = json.loads(result[0])
+            if child_id not in children_ids:
+                children_ids.append(child_id)
+
+                cursor.execute("""
+                    UPDATE parents SET children_ids = ? WHERE id = ?
+                """, (json.dumps(children_ids), parent_id))
+
+                conn.commit()
+
+        conn.close()
+
+    def get_child_progress_summary(self, child_id: int, days: int = 30) -> Dict:
+        """Get comprehensive progress summary for a child"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+
+        # Get student profile
+        cursor.execute("SELECT profile_data FROM students WHERE id = ?", (child_id,))
+        profile_result = cursor.fetchone()
+
+        if not profile_result:
+            return {}
+
+        profile_data = json.loads(profile_result[0])
+
+        # Get recent quiz results
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).isoformat()
+        cursor.execute("""
+            SELECT result_data FROM quiz_results
+            WHERE student_id = ? AND timestamp >= ?
+            ORDER BY timestamp DESC
+        """, (child_id, start_date))
+
+        quiz_results = []
+        for row in cursor.fetchall():
+            quiz_results.append(json.loads(row[0]))
+
+        conn.close()
+
+        # Calculate statistics
+        total_sessions = len(quiz_results)
+        total_problems = sum(result.get('problems_attempted', 0) for result in quiz_results)
+        avg_accuracy = np.mean([result.get('score', 0) for result in quiz_results]) if quiz_results else 0
+
+        # Topic performance
+        topic_performance = {}
+        for result in quiz_results:
+            topic = result.get('topic', 'unknown')
+            if topic not in topic_performance:
+                topic_performance[topic] = []
+            topic_performance[topic].append(result.get('score', 0))
+
+        # Calculate averages for each topic
+        topic_averages = {topic: np.mean(scores) for topic, scores in topic_performance.items()}
+
+        return {
+            'student_name': profile_data.get('name', 'Unknown'),
+            'current_grade': profile_data.get('current_grade', 5),
+            'total_sessions': total_sessions,
+            'total_problems_solved': total_problems,
+            'average_accuracy': avg_accuracy,
+            'topic_performance': topic_averages,
+            'strengths': profile_data.get('strengths', []),
+            'weaknesses': profile_data.get('weaknesses', []),
+            'learning_speed': profile_data.get('learning_speed', 1.0),
+            'recent_sessions': quiz_results[:10]  # Last 10 sessions
+        }
+
+    def generate_progress_chart(self, child_id: int, days: int = 30) -> str:
+        """Generate progress chart and return base64 encoded image"""
+        progress_data = self.get_child_progress_summary(child_id, days)
+
+        if not progress_data.get('recent_sessions'):
+            return ""
+
+        # Prepare data for plotting
+        sessions = progress_data['recent_sessions']
+        dates = [session.get('timestamp', '')[:10] for session in reversed(sessions)]
+        scores = [session.get('score', 0) * 100 for session in reversed(sessions)]
+
+        # Create subplot with secondary y-axis
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=('Progress Over Time', 'Topic Performance', 'Session Duration', 'Problems Solved'),
+            specs=[[{"secondary_y": False}, {"type": "bar"}],
+                   [{"type": "scatter"}, {"type": "bar"}]]
+        )
+
+        # Progress over time
+        fig.add_trace(
+            go.Scatter(x=dates, y=scores, mode='lines+markers', name='Accuracy %', line=dict(color='blue')),
+            row=1, col=1
+        )
+
+        # Topic performance
+        topics = list(progress_data['topic_performance'].keys())
+        topic_scores = [progress_data['topic_performance'][topic] * 100 for topic in topics]
+        fig.add_trace(
+            go.Bar(x=topics, y=topic_scores, name='Topic Avg %', marker_color='green'),
+            row=1, col=2
+        )
+
+        # Session duration (mock data for demonstration)
+        durations = [random.randint(15, 45) for _ in sessions]
+        fig.add_trace(
+            go.Scatter(x=dates, y=durations, mode='markers', name='Duration (min)', marker=dict(color='orange')),
+            row=2, col=1
+        )
+
+        # Problems solved per session
+        problems_per_session = [session.get('problems_attempted', 0) for session in reversed(sessions)]
+        fig.add_trace(
+            go.Bar(x=dates, y=problems_per_session, name='Problems Solved', marker_color='red'),
+            row=2, col=2
+        )
+
+        fig.update_layout(height=800, showlegend=False, title_text=f"Progress Dashboard - {progress_data['student_name']}")
+
+        # Convert to base64
+        import io
+        import plotly.io as pio
+
+        img_bytes = pio.to_image(fig, format="png")
+        img_base64 = base64.b64encode(img_bytes).decode()
+
+        return img_base64
+
+class MathConceptTeacher:
+    """Handles concept explanation and teaching"""
+
+    def __init__(self):
+        self.concepts = {
+            # Grade 5-6 Concepts
+            5: {
+                TopicCategory.ARITHMETIC: [
+                    "Basic Operations (Addition, Subtraction, Multiplication, Division)",
+                    "Fractions and Decimals",
+                    "Factors and Multiples",
+                    "Simple Word Problems"
+                ],
+                TopicCategory.GEOMETRY: [
+                    "Basic Shapes and Properties",
+                    "Area and Perimeter of Rectangles",
+                    "Angles - Types and Measurement"
+                ]
+            },
+            # Grade 7-8 Concepts
+            7: {
+                TopicCategory.ARITHMETIC: [
+                    "Rational Numbers",
+                    "Percentage and Profit-Loss",
+                    "Simple Interest"
+                ],
+                TopicCategory.ALGEBRA: [
+                    "Introduction to Variables",
+                    "Simple Linear Equations",
+                    "Basic Algebraic Expressions"
+                ],
+                TopicCategory.GEOMETRY: [
+                    "Triangles and their Properties",
+                    "Quadrilaterals",
+                    "Circle - Basic Properties"
+                ]
+            },
+            # Grade 9-10 Concepts
+            9: {
+                TopicCategory.ALGEBRA: [
+                    "Linear Equations in Two Variables",
+                    "Quadratic Equations",
+                    "Polynomials",
+                    "Arithmetic and Geometric Progressions"
+                ],
+                TopicCategory.GEOMETRY: [
+                    "Coordinate Geometry",
+                    "Triangles - Similarity and Congruence",
+                    "Areas of Triangles and Quadrilaterals"
+                ],
+                TopicCategory.TRIGONOMETRY: [
+                    "Introduction to Trigonometry",
+                    "Trigonometric Ratios",
+                    "Heights and Distances"
+                ],
+                TopicCategory.STATISTICS: [
+                    "Statistics - Mean, Median, Mode",
+                    "Data Representation"
+                ]
+            },
+            # Grade 11-12 Concepts
+            11: {
+                TopicCategory.ALGEBRA: [
+                    "Complex Numbers",
+                    "Sequences and Series",
+                    "Permutations and Combinations",
+                    "Binomial Theorem"
+                ],
+                TopicCategory.CALCULUS: [
+                    "Limits and Derivatives",
+                    "Applications of Derivatives",
+                    "Integrals and Applications"
+                ],
+                TopicCategory.TRIGONOMETRY: [
+                    "Trigonometric Functions",
+                    "Inverse Trigonometric Functions",
+                    "Trigonometric Equations"
+                ],
+                TopicCategory.PROBABILITY: [
+                    "Probability Theory",
+                    "Random Variables",
+                    "Probability Distributions"
+                ]
+            }
+        }
+
+    def get_concept_explanation(self, topic: TopicCategory, grade: int, concept: str) -> str:
+        """Generate detailed explanation for a concept"""
+        explanations = {
+            (TopicCategory.ALGEBRA, "Linear Equations"): """
+            Linear Equations are equations where the highest power of the variable is 1.
+
+            General form: ax + b = 0 (where a ≠ 0)
+
+            Key Steps to Solve:
+            1. Isolate the variable term on one side
+            2. Move constants to the other side
+            3. Divide by the coefficient of the variable
+
+            Example: 3x + 5 = 14
+            Step 1: 3x = 14 - 5 = 9
+            Step 2: x = 9/3 = 3
+
+            Practice this method with different problems!
+            """,
+
+            (TopicCategory.GEOMETRY, "Triangles"): """
+            Triangles are three-sided polygons with important properties:
+
+            Types of Triangles:
+            1. By sides: Equilateral, Isosceles, Scalene
+            2. By angles: Acute, Right, Obtuse
+
+            Key Properties:
+            - Sum of angles = 180°
+            - Sum of any two sides > third side
+            - Area = (1/2) × base × height
+
+            Remember: Understanding these basics helps with complex geometry!
+            """,
+
+            (TopicCategory.CALCULUS, "Derivatives"): """
+            Derivatives measure the rate of change of a function.
+
+            Basic Rules:
+            1. Power Rule: d/dx(x^n) = n·x^(n-1)
+            2. Sum Rule: d/dx(f + g) = f' + g'
+            3. Product Rule: d/dx(fg) = f'g + fg'
+
+            Applications:
+            - Finding slopes of curves
+            - Optimization problems
+            - Motion analysis
+
+            Start with simple polynomials and build up complexity!
+            """
+        }
+
+        # Return specific explanation or generate generic one
+        key = (topic, concept)
+        if key in explanations:
+            return explanations[key]
+        else:
+            return f"""
+            Topic: {concept} ({topic.value})
+            Grade Level: {grade}
+
+            This concept builds upon your previous knowledge and introduces new problem-solving techniques.
+            Focus on understanding the fundamentals before moving to complex applications.
+
+            Key learning approach:
+            1. Understand the definition
+            2. Learn the formulas/methods
+            3. Practice with examples
+            4. Apply to word problems
+            """
+
+class ProblemGenerator:
+    """Generates math problems based on topic and difficulty"""
+
+    def __init__(self):
+        self.problem_templates = self._initialize_templates()
+
+    def _initialize_templates(self) -> Dict:
+        return {
+            TopicCategory.ARITHMETIC: {
+                5: [
+                    {"template": "What is {a} + {b}?", "answer": lambda a, b: a + b},
+                    {"template": "What is {a} - {b}?", "answer": lambda a, b: a - b},
+                    {"template": "What is {a} × {b}?", "answer": lambda a, b: a * b},
+                    {"template": "What is {a} ÷ {b}? (round to 2 decimal places)", "answer": lambda a, b: round(a / b, 2)}
+                ],
+                7: [
+                    {"template": "What is {a}% of {b}?", "answer": lambda a, b: (a * b) / 100},
+                    {"template": "If an item costs ${a} and is discounted by {b}%, what is the final price?",
+                     "answer": lambda a, b: round(a * (1 - b/100), 2)}
+                ]
+            },
+            TopicCategory.ALGEBRA: {
+                7: [
+                    {"template": "Solve for x: {a}x + {b} = {c}", "answer": lambda a, b, c: (c - b) / a},
+                    {"template": "If x = {a}, what is the value of {b}x + {c}?", "answer": lambda a, b, c: b * a + c}
+                ],
+                9: [
+                    {"template": "Solve: x² + {a}x + {b} = 0 (give one solution)",
+                     "answer": lambda a, b: (-a + math.sqrt(a**2 - 4*b)) / 2 if a**2 - 4*b >= 0 else "No real solution"},
+                    {"template": "Expand: (x + {a})(x + {b})", "answer": lambda a, b: f"x² + {a+b}x + {a*b}"}
+                ]
+            },
+            TopicCategory.GEOMETRY: {
+                5: [
+                    {"template": "What is the area of a rectangle with length {a} and width {b}?",
+                     "answer": lambda a, b: a * b},
+                    {"template": "What is the perimeter of a square with side {a}?", "answer": lambda a: 4 * a}
+                ],
+                9: [
+                    {"template": "In a right triangle, if one leg is {a} and hypotenuse is {c}, what is the other leg?",
+                     "answer": lambda a, c: round(math.sqrt(c**2 - a**2), 2) if c > a else "Invalid"}
+                ]
+            }
+        }
+
+    def generate_problem(self, topic: TopicCategory, grade: int, difficulty: DifficultyLevel) -> MathProblem:
+        """Generate a problem based on parameters"""
+        if topic not in self.problem_templates or grade not in self.problem_templates[topic]:
+            # Fallback to basic arithmetic
+            topic = TopicCategory.ARITHMETIC
+            grade = 5
+
+        templates = self.problem_templates[topic][grade]
+        template = random.choice(templates)
+
+        # Generate random parameters based on difficulty
+        difficulty_multiplier = difficulty.value
+
+        if topic == TopicCategory.ARITHMETIC:
+            a = random.randint(1, 20 * difficulty_multiplier)
+            b = random.randint(1, 20 * difficulty_multiplier)
+            c = random.randint(1, 50 * difficulty_multiplier)
+        elif topic == TopicCategory.ALGEBRA:
+            a = random.randint(1, 10 * difficulty_multiplier)
+            b = random.randint(-20, 20)
+            c = random.randint(-50, 50)
+        else:
+            a = random.randint(2, 15 * difficulty_multiplier)
+            b = random.randint(2, 15 * difficulty_multiplier)
+            c = random.randint(5, 25 * difficulty_multiplier)
+
+        # Generate question and answer
+        question = template["template"].format(a=a, b=b, c=c)
+
+        try:
+            if len(template["answer"].__code__.co_varnames) == 1:
+                answer = template["answer"](a)
+            elif len(template["answer"].__code__.co_varnames) == 2:
+                answer = template["answer"](a, b)
+            else:
+                answer = template["answer"](a, b, c)
+        except Exception as e:
+            answer = "Error in calculation"
+
+        return MathProblem(
+            id=f"{topic.value}_{grade}_{random.randint(1000, 9999)}",
+            topic=topic,
+            grade_level=grade,
+            difficulty=difficulty,
+            question=question,
+            correct_answer=str(answer),
+            explanation=f"This problem tests your understanding of {topic.value} at grade {grade} level.",
+            hints=[f"Remember the basic rules of {topic.value}", "Take your time to understand the question"],
+            related_concepts=[f"{topic.value} fundamentals"]
+        )
+
+class AdaptiveLearningEngine:
+    """Core engine that adapts to student performance"""
+
+    def __init__(self):
+        self.performance_history = []
+        self.difficulty_adjustment_threshold = 0.8
+        self.concept_mastery_threshold = 0.75
+
+    def analyze_performance(self, recent_results: List[QuizResult]) -> Dict:
+        """Analyze student performance and suggest adaptations"""
+        if not recent_results:
+            return {"recommendation": "start_assessment"}
+
+        total_problems = sum(r.problems_attempted for r in recent_results)
+        total_correct = sum(r.score * r.problems_attempted for r in recent_results)
+        overall_accuracy = total_correct / total_problems if total_problems > 0 else 0
+
+        # Analyze by topic
+        topic_performance = {}
+        for result in recent_results:
+            topic = result.topic.value
+            if topic not in topic_performance:
+                topic_performance[topic] = []
+            topic_performance[topic].append(result.score)
+
+        recommendations = {
+            "overall_accuracy": overall_accuracy,
+            "topic_performance": topic_performance,
+            "adaptations": []
+        }
+
+        # Generate recommendations
+        if overall_accuracy > self.difficulty_adjustment_threshold:
+            recommendations["adaptations"].append("increase_difficulty")
+        elif overall_accuracy < 0.5:
+            recommendations["adaptations"].append("decrease_difficulty")
+            recommendations["adaptations"].append("review_concepts")
+
+        return recommendations
+
+    def suggest_next_topic(self, student_profile: StudentProfile) -> Tuple[TopicCategory, int]:
+        """Suggest the next topic and grade level for the student"""
+        weakest_topics = student_profile.weaknesses[:2] if student_profile.weaknesses else []
+
+        if weakest_topics:
+            # Focus on weakness
+            topic_name = weakest_topics[0]
+            topic = TopicCategory(topic_name) if topic_name in [t.value for t in TopicCategory] else TopicCategory.ARITHMETIC
+            grade = max(5, student_profile.current_level.get(topic_name, 5))
+        else:
+            # Progress to new topic
+            topic = TopicCategory.ARITHMETIC
+            grade = student_profile.current_grade
+
+        return topic, grade
+
+class AssessmentEngine:
+    """Handles initial and periodic assessments"""
+
+    def __init__(self):
+        self.problem_generator = ProblemGenerator()
+        self.assessment_problems = []
+
+    def create_initial_assessment(self) -> List[MathProblem]:
+        """Create a comprehensive initial assessment"""
+        problems = []
+
+        # Test different grade levels and topics
+        topics_to_test = [
+            (TopicCategory.ARITHMETIC, 5),
+            (TopicCategory.ARITHMETIC, 7),
+            (TopicCategory.ALGEBRA, 7),
+            (TopicCategory.ALGEBRA, 9),
+            (TopicCategory.GEOMETRY, 5),
+            (TopicCategory.GEOMETRY, 9)
+        ]
+
+        for topic, grade in topics_to_test:
+            for difficulty in [DifficultyLevel.BEGINNER, DifficultyLevel.INTERMEDIATE]:
+                problem = self.problem_generator.generate_problem(topic, grade, difficulty)
+                problems.append(problem)
+
+        return problems
+
+    def evaluate_assessment(self, responses: Dict[str, str], problems: List[MathProblem]) -> StudentProfile:
+        """Evaluate assessment responses and create student profile"""
+        correct_by_topic = {}
+        total_by_topic = {}
+        correct_by_grade = {}
+        total_by_grade = {}
+
+        total_correct = 0
+        total_problems = len(problems)
+
+        for problem in problems:
+            topic = problem.topic.value
+            grade = problem.grade_level
+
+            # Initialize counters
+            if topic not in correct_by_topic:
+                correct_by_topic[topic] = 0
+                total_by_topic[topic] = 0
+            if grade not in correct_by_grade:
+                correct_by_grade[grade] = 0
+                total_by_grade[grade] = 0
+
+            total_by_topic[topic] += 1
+            total_by_grade[grade] += 1
+
+            # Check answer
+            user_answer = responses.get(problem.id, "").strip()
+            correct_answer = problem.correct_answer.strip()
+
+            try:
+                if abs(float(user_answer) - float(correct_answer)) < 0.01:
+                    correct_by_topic[topic] += 1
+                    correct_by_grade[grade] += 1
+                    total_correct += 1
+            except ValueError:
+                if user_answer.lower() == correct_answer.lower():
+                    correct_by_topic[topic] += 1
+                    correct_by_grade[grade] += 1
+                    total_correct += 1
+
+        # Determine strengths and weaknesses
+        strengths = []
+        weaknesses = []
+
+        for topic, correct in correct_by_topic.items():
+            accuracy = correct / total_by_topic[topic]
+            if accuracy >= 0.8:
+                strengths.append(topic)
+            elif accuracy < 0.5:
+                weaknesses.append(topic)
+
+        # Determine current grade level
+        max_grade = 5
+        for grade, correct in correct_by_grade.items():
+            accuracy = correct / total_by_grade[grade]
+            if accuracy >= 0.6:
+                max_grade = max(max_grade, grade)
+
+        # Determine learning speed based on overall performance
+        overall_accuracy = total_correct / total_problems
+        if overall_accuracy >= 0.8:
+            learning_speed = 1.5
+        elif overall_accuracy >= 0.6:
+            learning_speed = 1.0
+        else:
+            learning_speed = 0.7
+
+        now = datetime.datetime.now().isoformat()
+        return StudentProfile(
+            name="Student",
+            current_grade=max_grade,
+            strengths=strengths,
+            weaknesses=weaknesses,
+            learning_speed=learning_speed,
+            current_level={topic: max_grade for topic in correct_by_topic.keys()},
+            total_problems_solved=total_problems,
+            accuracy_rate=overall_accuracy,
+            created_at=now,
+            updated_at=now
+        )
+
+class DatabaseManager:
+    """Enhanced database manager with parent dashboard support"""
+
+    def __init__(self, db_path: str = "math_tutor.db"):
+        self.db_path = db_path
+        self.init_database()
+
+    def init_database(self):
+        """Initialize database tables"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Student profiles table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS students (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                profile_data TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+        """)
+
+        # Parents table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS parents (
+                id INTEGER PRIMARY KEY,
+                name TEXT,
+                email TEXT UNIQUE,
+                password_hash TEXT,
+                children_ids TEXT,
+                notification_preferences TEXT,
+                created_at TIMESTAMP
+            )
+        """)
+
+        # Quiz results table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS quiz_results (
+                id INTEGER PRIMARY KEY,
+                student_id INTEGER,
+                result_data TEXT,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (student_id) REFERENCES students (id)
+            )
+        """)
+
+        # Session reports table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS session_reports (
+                id INTEGER PRIMARY KEY,
+                student_id INTEGER,
+                report_data TEXT,
+                timestamp TIMESTAMP,
+                FOREIGN KEY (student_id) REFERENCES students (id)
+            )
+        """)
+
+        # Moodle integration table
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS moodle_sync (
+                id INTEGER PRIMARY KEY,
+                student_id INTEGER,
+                moodle_user_id INTEGER,
+                course_id INTEGER,
+                last_sync TIMESTAMP,
+                FOREIGN KEY (student_id) REFERENCES students (id)
+            )
+        """)
+
+        conn.commit()
+        conn.close()
+
+    def save_student_profile(self, profile: StudentProfile) -> int:
+        """Save student profile and return student ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        now = datetime.datetime.now().isoformat()
+        profile_json = json.dumps(asdict(profile))
+
+        cursor.execute("""
+            INSERT INTO students (name, profile_data, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+        """, (profile.name, profile_json, now, now))
+
+        student_id = cursor.lastrowid
+        conn.commit()
+        conn.close()
+
+        return student_id
+
+    def load_student_profile(self, student_id: int) -> Optional[StudentProfile]:
+        """Load student profile by ID"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT profile_data FROM students WHERE id = ?", (student_id,))
+        result = cursor.fetchone()
+
+        conn.close()
+
+        if result:
+            profile_data = json.loads(result[0])
+            return StudentProfile(**profile_data)
+        return None
+
+    def save_quiz_result(self, student_id: int, result: QuizResult):
+        """Save quiz result"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        result_json = json.dumps(asdict(result))
+        cursor.execute("""
+            INSERT INTO quiz_results (student_id, result_data, timestamp)
+            VALUES (?, ?, ?)
+        """, (student_id, result_json, result.timestamp))
+
+        conn.commit()
+        conn.close()
+
+    def save_session_report(self, report: SessionReport):
+        """Save session report"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        report_json = json.dumps(asdict(report))
+        cursor.execute("""
+            INSERT INTO session_reports (student_id, report_data, timestamp)
+            VALUES (?, ?, ?)
+        """, (report.student_id, report_json, report.date))
+
+        conn.commit()
+        conn.close()
+
+    def get_student_quiz_results(self, student_id: int, limit: int = 10) -> List[QuizResult]:
+        """Get recent quiz results for student"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT result_data FROM quiz_results
+            WHERE student_id = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (student_id, limit))
+
+        results = []
+        for row in cursor.fetchall():
+            result_data = json.loads(row[0])
+            results.append(QuizResult(**result_data))
+
+        conn.close()
+        return results
+
+class MathTutorApp:
+    """Enhanced main application class with parent dashboard and Moodle integration"""
+
+    def __init__(self, config: Dict = None):
+        self.db_manager = DatabaseManager()
+        self.assessment_engine = AssessmentEngine()
+        self.problem_generator = ProblemGenerator()
+        self.concept_teacher = MathConceptTeacher()
+        self.adaptive_engine = AdaptiveLearningEngine()
+        self.parent_dashboard = ParentDashboard(self.db_manager)
+
+        # Initialize optional components if config provided
+        self.moodle_integration = None
+        self.notification_system = None
+
+        if config:
+            if config.get('moodle'):
+                self.moodle_integration = MoodleIntegration(
+                    config['moodle']['url'],
+                    config['moodle']['token']
+                )
+
+            if config.get('email'):
+                self.notification_system = NotificationSystem(
+                    config['email']['smtp_server'],
+                    config['email']['smtp_port'],
+                    config['email']['username'],
+                    config['email']['password']
+                )
+
+        self.current_student_profile = None
+        self.current_student_id = None
+        self.current_session_results = []
+
+    def start_new_student(self, name: str, parent_email: str = None) -> StudentProfile:
+        """Start assessment for new student"""
+        print(f"Welcome {name}! Let's start with an assessment to understand your current level.")
+
+        # Create and run assessment
+        assessment_problems = self.assessment_engine.create_initial_assessment()
+
+        print(f"\nAssessment: {len(assessment_problems)} problems")
+        print("Please answer the following questions. Type your answer and press Enter.")
+        print("If you don't know an answer, type 'skip'\n")
+
+        responses = {}
+        start_time = datetime.datetime.now()
+
+        for i, problem in enumerate(assessment_problems, 1):
+            print(f"Question {i}/{len(assessment_problems)}")
+            print(f"Topic: {problem.topic.value.title()} (Grade {problem.grade_level})")
+            print(f"Q: {problem.question}")
+
+            answer = input("Your answer: ").strip()
+            responses[problem.id] = answer
+            print()
+
+        # Evaluate assessment
+        profile = self.assessment_engine.evaluate_assessment(responses, assessment_problems)
+        profile.name = name
+        profile.parent_email = parent_email
+
+        # Create Moodle user if integration is available
+        if self.moodle_integration and parent_email:
+            moodle_user_id = self.moodle_integration.create_user(
+                username=name.lower().replace(' ', ''),
+                password='temp123',  # Should be changed by user
+                firstname=name.split()[0],
+                lastname=name.split()[-1] if len(name.split()) > 1 else '',
+                email=parent_email
+            )
+            profile.moodle_user_id = moodle_user_id
+
+        # Save profile
+        student_id = self.db_manager.save_student_profile(profile)
+        print(f"Assessment complete! Student ID: {student_id}")
+
+        self.current_student_profile = profile
+        self.current_student_id = student_id
+        self.display_student_profile(profile)
+
+        return profile
+
+    def display_student_profile(self, profile: StudentProfile):
+        """Display student profile information"""
+        print("\n" + "="*50)
+        print("STUDENT PROFILE")
+        print("="*50)
+        print(f"Name: {profile.name}")
+        print(f"Current Grade Level: {profile.current_grade}")
+        print(f"Learning Speed: {profile.learning_speed:.1f}x")
+        print(f"Overall Accuracy: {profile.accuracy_rate:.1%}")
+        print(f"Strengths: {', '.join(profile.strengths) if profile.strengths else 'To be determined'}")
+        print(f"Areas for Improvement: {', '.join(profile.weaknesses) if profile.weaknesses else 'None identified'}")
+        print("="*50)
+
+    def teaching_session(self, topic: TopicCategory, grade: int):
+        """Conduct a teaching session"""
+        session_start = datetime.datetime.now()
+        print(f"\n📚 LEARNING SESSION: {topic.value.title()} (Grade {grade})")
+        print("-" * 50)
+
+        # Get concepts for this topic and grade
+        concepts = self.concept_teacher.concepts.get(grade, {}).get(topic, ["Basic concepts"])
+
+        if concepts:
+            concept = random.choice(concepts)
+            explanation = self.concept_teacher.get_concept_explanation(topic, grade, concept)
+
+            print(f"Today's Topic: {concept}")
+            print("\nConcept Explanation:")
+            print(explanation)
+
+            input("\nPress Enter when you're ready for practice problems...")
+
+        # Generate practice problems
+        session_results = self.practice_session(topic, grade)
+
+        # Create session report
+        session_end = datetime.datetime.now()
+        duration_minutes = int((session_end - session_start).total_seconds() / 60)
+
+        report = SessionReport(
+            student_id=self.current_student_id,
+            date=session_start.strftime("%Y-%m-%d %H:%M:%S"),
+            duration_minutes=duration_minutes,
+            topics_covered=[topic.value],
+            problems_solved=len(session_results),
+            accuracy_rate=np.mean([r.score for r in session_results]) if session_results else 0,
+            difficulties_encountered=self._identify_difficulties(session_results),
+            improvements_noted=self._identify_improvements(session_results),
+            next_recommendations=self._generate_recommendations(topic, grade, session_results)
+        )
+
+        # Save session report
+        self.db_manager.save_session_report(report)
+
+        # Send parent notification if enabled
+        if (self.notification_system and
+            self.current_student_profile and
+            self.current_student_profile.parent_email):
+
+            self.notification_system.send_progress_report(
+                self.current_student_profile.parent_email,
+                self.current_student_profile.name,
+                report
+            )
+
+        # Sync with Moodle if available
+        if (self.moodle_integration and
+            self.current_student_profile and
+            self.current_student_profile.moodle_user_id):
+
+            self._sync_with_moodle(report)
+
+    def practice_session(self, topic: TopicCategory, grade: int) -> List[QuizResult]:
+        """Conduct a practice session with adaptive difficulty"""
+        print(f"\n🔍 PRACTICE SESSION: {topic.value.title()}")
+        print("-" * 30)
+
+        correct_answers = 0
+        total_problems = 0
+        current_difficulty = DifficultyLevel.BEGINNER
+        session_results = []
+
+        problems_to_solve = 5
+        if self.current_student_profile:
+            problems_to_solve = int(5 * self.current_student_profile.learning_speed)
+
+        for i in range(problems_to_solve):
+            problem = self.problem_generator.generate_problem(topic, grade, current_difficulty)
+
+            print(f"\nProblem {i+1}/{problems_to_solve}")
+            print(f"Difficulty: {current_difficulty.name}")
+            print(f"Q: {problem.question}")
+
+            # Get student answer
+            user_answer = input("Your answer: ").strip()
+
+            # Check answer
+            correct = False
+            try:
+                if abs(float(user_answer) - float(problem.correct_answer)) < 0.01:
+                    correct = True
+            except ValueError:
+                if user_answer.lower() == problem.correct_answer.lower():
+                    correct = True
+
+            total_problems += 1
+            if correct:
+                correct_answers += 1
+                print("✅ Correct! Well done!")
+
+                # Increase difficulty if doing well
+                if correct_answers / total_problems > 0.8 and current_difficulty.value < 5:
+                    current_difficulty = DifficultyLevel(current_difficulty.value + 1)
+                    print(f"🎯 Great job! Moving to {current_difficulty.name} difficulty.")
+            else:
+                print(f"❌ Incorrect. The correct answer is: {problem.correct_answer}")
+                print(f"💡 Explanation: {problem.explanation}")
+
+                # Decrease difficulty if struggling
+                if correct_answers / total_problems < 0.5 and current_difficulty.value > 1:
+                    current_difficulty = DifficultyLevel(current_difficulty.value - 1)
+                    print(f"📚 Let's try {current_difficulty.name} difficulty problems.")
+
+            # Create quiz result for this problem
+            quiz_result = QuizResult(
+                topic=topic,
+                score=1.0 if correct else 0.0,
+                time_taken=0,
+                problems_attempted=1,
+                mistakes=[] if correct else [problem.question],
+                timestamp=datetime.datetime.now().isoformat(),
+                student_id=self.current_student_id
+            )
+            session_results.append(quiz_result)
+
+            # Save individual result
+            if self.current_student_id:
+                self.db_manager.save_quiz_result(self.current_student_id, quiz_result)
+
+        # Session summary
+        accuracy = correct_answers / total_problems
+        print(f"\n📊 SESSION SUMMARY")
+        print(f"Problems solved: {total_problems}")
+        print(f"Correct answers: {correct_answers}")
+        print(f"Accuracy: {accuracy:.1%}")
+
+        # Update student progress
+        if self.current_student_profile:
+            self.update_student_progress(topic, grade, accuracy)
+
+        self.current_session_results.extend(session_results)
+        return session_results
+
+    def _identify_difficulties(self, session_results: List[QuizResult]) -> List[str]:
+        """Identify areas of difficulty from session results"""
+        difficulties = []
+        incorrect_results = [r for r in session_results if r.score == 0.0]
+
+        if len(incorrect_results) > len(session_results) * 0.5:
+            difficulties.append("High error rate - needs more foundational practice")
+
+        if incorrect_results:
+            topics = set(r.topic.value for r in incorrect_results)
+            difficulties.extend([f"Struggles with {topic} problems" for topic in topics])
+
+        return difficulties or ["No major difficulties identified"]
+
+    def _identify_improvements(self, session_results: List[QuizResult]) -> List[str]:
+        """Identify improvements from session results"""
+        improvements = []
+        correct_results = [r for r in session_results if r.score == 1.0]
+
+        if len(correct_results) > len(session_results) * 0.8:
+            improvements.append("Excellent problem-solving accuracy")
+
+        if correct_results:
+            improvements.append("Shows good understanding of mathematical concepts")
+
+        return improvements or ["Continue practicing to build confidence"]
+
+    def _generate_recommendations(self, topic: TopicCategory, grade: int, session_results: List[QuizResult]) -> List[str]:
+        """Generate recommendations for next session"""
+        recommendations = []
+        accuracy = np.mean([r.score for r in session_results]) if session_results else 0
+
+        if accuracy > 0.8:
+            recommendations.append(f"Ready to advance to more complex {topic.value} problems")
+            recommendations.append("Consider exploring the next grade level topics")
+        elif accuracy < 0.6:
+            recommendations.append(f"Review fundamental {topic.value} concepts")
+            recommendations.append("Practice with easier problems to build confidence")
+        else:
+            recommendations.append(f"Continue practicing {topic.value} at current level")
+            recommendations.append("Focus on problem-solving strategies")
+
+        return recommendations
+
+    def _sync_with_moodle(self, report: SessionReport):
+        """Sync session results with Moodle"""
+        if not (self.moodle_integration and self.current_student_profile.moodle_user_id):
+            return
+
+        try:
+            # Create assignment based on session
+            assignment_result = self.moodle_integration.create_assignment_from_session(
+                course_id=1,  # Should be configurable
+                session_report=report
+            )
+
+            # Submit grade
+            if assignment_result and 'assignments' in assignment_result:
+                assignment_id = assignment_result['assignments'][0]['id']
+                grade = report.accuracy_rate * 100  # Convert to percentage
+
+                feedback = f"""
+                Session completed on {report.date}
+                Duration: {report.duration_minutes} minutes
+                Topics: {', '.join(report.topics_covered)}
+                Problems solved: {report.problems_solved}
+
+                Areas for improvement: {', '.join(report.difficulties_encountered)}
+                Recommendations: {', '.join(report.next_recommendations)}
+                """
+
+                self.moodle_integration.submit_grade(
+                    user_id=self.current_student_profile.moodle_user_id,
+                    assignment_id=assignment_id,
+                    grade=grade,
+                    feedback=feedback
+                )
+
+        except Exception as e:
+            print(f"Moodle sync error: {e}")
+
+    def update_student_progress(self, topic: TopicCategory, grade: int, accuracy: float):
+        """Update student profile based on performance"""
+        if not self.current_student_profile:
+            return
+
+        topic_name = topic.value
+
+        # Update accuracy rate
+        total_solved = self.current_student_profile.total_problems_solved
+        current_accuracy = self.current_student_profile.accuracy_rate
+
+        # Weighted average of accuracies
+        new_total = total_solved + 5
+        new_accuracy = (current_accuracy * total_solved + accuracy * 5) / new_total
+
+        self.current_student_profile.accuracy_rate = new_accuracy
+        self.current_student_profile.total_problems_solved = new_total
+        self.current_student_profile.updated_at = datetime.datetime.now().isoformat()
+
+        # Update topic level
+        if accuracy >= 0.8:
+            current_level = self.current_student_profile.current_level.get(topic_name, grade)
+            self.current_student_profile.current_level[topic_name] = min(12, current_level + 1)
+
+            if topic_name in self.current_student_profile.weaknesses:
+                self.current_student_profile.weaknesses.remove(topic_name)
+
+            if topic_name not in self.current_student_profile.strengths:
+                self.current_student_profile.strengths.append(topic_name)
+
+        elif accuracy < 0.6:
+            if topic_name not in self.current_student_profile.weaknesses:
+                self.current_student_profile.weaknesses.append(topic_name)
+
+        # Update in database
+        if self.current_student_id:
+            conn = sqlite3.connect(self.db_manager.db_path)
+            cursor = conn.cursor()
+
+            profile_json = json.dumps(asdict(self.current_student_profile))
+            cursor.execute("""
+                UPDATE students SET profile_data = ?, updated_at = ? WHERE id = ?
+            """, (profile_json, self.current_student_profile.updated_at, self.current_student_id))
+
+            conn.commit()
+            conn.close()
+
+    def suggest_next_session(self) -> Tuple[TopicCategory, int]:
+        """Suggest what to study next"""
+        if not self.current_student_profile:
+            return TopicCategory.ARITHMETIC, 5
+
+        return self.adaptive_engine.suggest_next_topic(self.current_student_profile)
+
+    def parent_login_menu(self):
+        """Parent login and dashboard menu"""
+        print("\n" + "="*50)
+        print("PARENT DASHBOARD")
+        print("="*50)
+        print("1. Login")
+        print("2. Register")
+        print("3. Back to Main Menu")
+
+        choice = input("\nSelect option (1-3): ").strip()
+
+        if choice == "1":
+            email = input("Enter email: ").strip()
+            password = input("Enter password: ").strip()
+
+            parent = self.parent_dashboard.authenticate_parent(email, password)
+            if parent:
+                self.parent_dashboard_menu(parent)
+            else:
+                print("Invalid credentials!")
+
+        elif choice == "2":
+            name = input("Enter your name: ").strip()
+            email = input("Enter email: ").strip()
+            password = input("Enter password: ").strip()
+
+            parent_id = self.parent_dashboard.register_parent(name, email, password)
+            print(f"Registration successful! Parent ID: {parent_id}")
+
+        elif choice == "3":
+            return
+
+    def parent_dashboard_menu(self, parent: ParentProfile):
+        """Main parent dashboard menu"""
+        while True:
+            print(f"\n" + "="*50)
+            print(f"WELCOME {parent.name.upper()}")
+            print("="*50)
+            print("1. View Children's Progress")
+            print("2. Link New Child")
+            print("3. Generate Progress Report")
+            print("4. Update Notification Preferences")
+            print("5. Logout")
+
+            choice = input("\nSelect option (1-5): ").strip()
+
+            if choice == "1":
+                self.view_children_progress(parent)
+            elif choice == "2":
+                self.link_child_to_parent_account(parent)
+            elif choice == "3":
+                self.generate_detailed_progress_report(parent)
+            elif choice == "4":
+                self.update_notification_preferences(parent)
+            elif choice == "5":
+                break
+
+    def view_children_progress(self, parent: ParentProfile):
+        """View progress for all linked children"""
+        if not parent.children_ids:
+            print("No children linked to your account yet.")
+            return
+
+        print("\n📊 CHILDREN'S PROGRESS OVERVIEW")
+        print("="*50)
+
+        for child_id in parent.children_ids:
+            progress = self.parent_dashboard.get_child_progress_summary(child_id)
+            if progress:
+                print(f"\n👤 {progress['student_name']}")
+                print(f"   Current Grade: {progress['current_grade']}")
+                print(f"   Total Sessions: {progress['total_sessions']}")
+                print(f"   Problems Solved: {progress['total_problems_solved']}")
+                print(f"   Average Accuracy: {progress['average_accuracy']:.1%}")
+                print(f"   Learning Speed: {progress['learning_speed']:.1f}x")
+                print(f"   Strengths: {', '.join(progress['strengths']) if progress['strengths'] else 'Developing'}")
+                print(f"   Areas to Improve: {', '.join(progress['weaknesses']) if progress['weaknesses'] else 'None'}")
+
+                # Show topic performance
+                if progress['topic_performance']:
+                    print("   Topic Performance:")
+                    for topic, accuracy in progress['topic_performance'].items():
+                        print(f"     • {topic.title()}: {accuracy:.1%}")
+
+        input("\nPress Enter to continue...")
+
+    def link_child_to_parent_account(self, parent: ParentProfile):
+        """Link a child's account to parent"""
+        student_id = input("Enter Student ID to link: ").strip()
+
+        try:
+            student_id = int(student_id)
+            student_profile = self.db_manager.load_student_profile(student_id)
+
+            if student_profile:
+                self.parent_dashboard.link_child_to_parent(parent.id, student_id)
+                parent.children_ids.append(student_id)  # Update local object
+                print(f"✅ Successfully linked {student_profile.name} to your account!")
+            else:
+                print("❌ Student ID not found!")
+
+        except ValueError:
+            print("❌ Invalid Student ID!")
+
+    def generate_detailed_progress_report(self, parent: ParentProfile):
+        """Generate detailed progress report with charts"""
+        if not parent.children_ids:
+            print("No children linked to your account.")
+            return
+
+        print("\n📈 GENERATING DETAILED REPORTS...")
+
+        for child_id in parent.children_ids:
+            progress = self.parent_dashboard.get_child_progress_summary(child_id, days=30)
+            if progress:
+                print(f"\n📋 DETAILED REPORT: {progress['student_name']}")
+                print("="*50)
+
+                # Basic stats
+                print(f"Reporting Period: Last 30 days")
+                print(f"Total Learning Sessions: {progress['total_sessions']}")
+                print(f"Total Problems Attempted: {progress['total_problems_solved']}")
+                print(f"Overall Accuracy Rate: {progress['average_accuracy']:.1%}")
+                print(f"Current Grade Level: {progress['current_grade']}")
+                print(f"Learning Speed Factor: {progress['learning_speed']:.1f}x")
+
+                # Strengths and weaknesses
+                print(f"\n🎯 STRENGTHS:")
+                for strength in progress['strengths']:
+                    print(f"   • {strength.title()}")
+
+                print(f"\n🎯 AREAS FOR IMPROVEMENT:")
+                for weakness in progress['weaknesses']:
+                    print(f"   • {weakness.title()}")
+
+                # Topic breakdown
+                print(f"\n📚 TOPIC PERFORMANCE:")
+                for topic, accuracy in progress['topic_performance'].items():
+                    status = "🟢 Excellent" if accuracy > 0.8 else "🟡 Good" if accuracy > 0.6 else "🔴 Needs Work"
+                    print(f"   • {topic.title()}: {accuracy:.1%} {status}")
+
+                # Recent sessions summary
+                print(f"\n🕒 RECENT SESSIONS:")
+                for session in progress['recent_sessions'][:5]:
+                    timestamp = session.get('timestamp', '')[:10]
+                    topic = session.get('topic', 'Unknown')
+                    score = session.get('score', 0)
+                    problems = session.get('problems_attempted', 0)
+                    print(f"   • {timestamp}: {topic.title()} - {score:.1%} ({problems} problems)")
+
+        input("\nPress Enter to continue...")
+
+    def update_notification_preferences(self, parent: ParentProfile):
+        """Update parent notification preferences"""
+        print(f"\n⚙️ NOTIFICATION PREFERENCES")
+        print("="*40)
+
+        current_prefs = parent.notification_preferences
+
+        print("Current Settings:")
+        for pref, enabled in current_prefs.items():
+            status = "✅ Enabled" if enabled else "❌ Disabled"
+            print(f"{pref.replace('_', ' ').title()}: {status}")
+
+        print("\nUpdate preferences:")
+        print("1. Session Reports")
+        print("2. Weekly Summary")
+        print("3. Achievement Alerts")
+        print("4. Save and Exit")
+
+        choice = input("\nSelect preference to toggle (1-4): ").strip()
+
+        pref_map = {
+            "1": "session_reports",
+            "2": "weekly_summary",
+            "3": "achievement_alerts"
+        }
+
+        if choice in pref_map:
+            pref_key = pref_map[choice]
+            current_prefs[pref_key] = not current_prefs[pref_key]
+
+            # Update in database
+            conn = sqlite3.connect(self.db_manager.db_path)
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE parents SET notification_preferences = ? WHERE id = ?
+            """, (json.dumps(current_prefs), parent.id))
+            conn.commit()
+            conn.close()
+
+            print(f"✅ {pref_key.replace('_', ' ').title()} preference updated!")
+        elif choice == "4":
+            return
+
+    def run_interactive_session(self):
+        """Enhanced interactive tutoring session with parent dashboard"""
+        print("🎓 Welcome to AI Math Tutor!")
+        print("Advanced Math Learning System for Grades 5-12")
+        print("Features: Adaptive Learning • Parent Dashboard • Moodle Integration")
+
+        while True:
+            print("\n" + "="*60)
+            print("MAIN MENU")
+            print("="*60)
+            print("1. New Student Assessment")
+            print("2. Continue Learning Session")
+            print("3. View Student Progress")
+            print("4. Practice Specific Topic")
+            print("5. Parent Dashboard")
+            print("6. System Administration")
+            print("7. Exit")
+
+            choice = input("\nSelect option (1-7): ").strip()
+
+            if choice == "1":
+                name = input("Enter student name: ").strip()
+                parent_email = input("Enter parent email (optional): ").strip() or None
+
+                if name:
+                    self.start_new_student(name, parent_email)
+
+            elif choice == "2":
+                if not self.current_student_profile:
+                    print("Please complete assessment first (Option 1)")
+                    continue
+
+                topic, grade = self.suggest_next_session()
+                print(f"\n🎯 Recommended: {topic.value.title()} (Grade {grade})")
+                confirm = input("Start this session? (y/n): ").strip().lower()
+
+                if confirm == 'y':
+                    self.teaching_session(topic, grade)
+
+            elif choice == "3":
+                if self.current_student_profile:
+                    self.display_student_profile(self.current_student_profile)
+
+                    if self.current_session_results:
+                        print("\nRecent Session Results:")
+                        for result in self.current_session_results[-3:]:
+                            print(f"- {result.topic.value.title()}: {result.score:.1%} accuracy")
+                else:
+                    print("No student profile available. Please complete assessment first.")
+
+            elif choice == "4":
+                if not self.current_student_profile:
+                    print("Please complete assessment first (Option 1)")
+                    continue
+
+                self.manual_topic_selection()
+
+            elif choice == "5":
+                self.parent_login_menu()
+
+            elif choice == "6":
+                self.admin_menu()
+
+            elif choice == "7":
+                print("Thank you for using AI Math Tutor! Keep learning! 📚")
+                break
+
+            else:
+                print("Invalid option. Please try again.")
+
+    def manual_topic_selection(self):
+        """Allow manual selection of topic and grade"""
+        print("\n📚 TOPIC SELECTION")
+        print("="*30)
+
+        # Display available topics
+        topics = list(TopicCategory)
+        for i, topic in enumerate(topics, 1):
+            print(f"{i}. {topic.value.title()}")
+
+        try:
+            topic_choice = int(input(f"\nSelect topic (1-{len(topics)}): "))
+            if 1 <= topic_choice <= len(topics):
+                selected_topic = topics[topic_choice - 1]
+
+                grade = int(input("Enter grade level (5-12): "))
+                if 5 <= grade <= 12:
+                    print(f"\nStarting practice session: {selected_topic.value.title()} (Grade {grade})")
+                    self.teaching_session(selected_topic, grade)
+                else:
+                    print("Invalid grade level!")
+            else:
+                print("Invalid topic selection!")
+        except ValueError:
+            print("Please enter valid numbers!")
+
+    def admin_menu(self):
+        """System administration menu"""
+        print("\n🔧 SYSTEM ADMINISTRATION")
+        print("="*40)
+        print("1. Database Statistics")
+        print("2. Export Student Data")
+        print("3. Backup Database")
+        print("4. Test Moodle Connection")
+        print("5. Test Email System")
+        print("6. Back to Main Menu")
+
+        choice = input("\nSelect option (1-6): ").strip()
+
+        if choice == "1":
+            self.show_database_stats()
+        elif choice == "2":
+            self.export_student_data()
+        elif choice == "3":
+            self.backup_database()
+        elif choice == "4":
+            self.test_moodle_connection()
+        elif choice == "5":
+            self.test_email_system()
+        elif choice == "6":
+            return
+
+    def show_database_stats(self):
+        """Show database statistics"""
+        conn = sqlite3.connect(self.db_manager.db_path)
+        cursor = conn.cursor()
+
+        # Get counts
+        cursor.execute("SELECT COUNT(*) FROM students")
+        student_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM parents")
+        parent_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM quiz_results")
+        quiz_count = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM session_reports")
+        session_count = cursor.fetchone()[0]
+
+        # Get latest activity
+        cursor.execute("SELECT MAX(timestamp) FROM quiz_results")
+        last_quiz = cursor.fetchone()[0] or "Never"
+
+        conn.close()
+
+        print("\n📊 DATABASE STATISTICS")
+        print("="*30)
+        print(f"Total Students: {student_count}")
+        print(f"Total Parents: {parent_count}")
+        print(f"Quiz Results: {quiz_count}")
+        print(f"Session Reports: {session_count}")
+        print(f"Last Activity: {last_quiz}")
+
+        input("\nPress Enter to continue...")
+
+    def export_student_data(self):
+        """Export student data to JSON"""
+        try:
+            conn = sqlite3.connect(self.db_manager.db_path)
+            cursor = conn.cursor()
+
+            # Get all student data
+            cursor.execute("SELECT * FROM students")
+            students = cursor.fetchall()
+
+            export_data = []
+            for student in students:
+                student_data = {
+                    'id': student[0],
+                    'name': student[1],
+                    'profile': json.loads(student[2]),
+                    'created_at': student[3],
+                    'updated_at': student[4]
+                }
+                export_data.append(student_data)
+
+            conn.close()
+
+            # Save to file
+            filename = f"student_export_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(filename, 'w') as f:
+                json.dump(export_data, f, indent=2)
+
+            print(f"✅ Student data exported to {filename}")
+
+        except Exception as e:
+            print(f"❌ Export failed: {e}")
+
+        input("\nPress Enter to continue...")
+
+    def backup_database(self):
+        """Create database backup"""
+        try:
+            backup_filename = f"math_tutor_backup_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+
+            # Copy database file
+            import shutil
+            shutil.copy2(self.db_manager.db_path, backup_filename)
+
+            print(f"✅ Database backed up to {backup_filename}")
+
+        except Exception as e:
+            print(f"❌ Backup failed: {e}")
+
+        input("\nPress Enter to continue...")
+
+    def test_moodle_connection(self):
+        """Test Moodle integration"""
+        if not self.moodle_integration:
+            print("❌ Moodle integration not configured!")
+            return
+
+        try:
+            # Test with a simple API call
+            result = self.moodle_integration.make_request('core_webservice_get_site_info', {})
+
+            if result and 'sitename' in result:
+                print(f"✅ Moodle connection successful!")
+                print(f"Site: {result.get('sitename', 'Unknown')}")
+                print(f"Version: {result.get('release', 'Unknown')}")
+            else:
+                print("❌ Moodle connection failed!")
+
+        except Exception as e:
+            print(f"❌ Moodle test failed: {e}")
+
+        input("\nPress Enter to continue...")
+
+    def test_email_system(self):
+        """Test email notification system"""
+        if not self.notification_system:
+            print("❌ Email system not configured!")
+            return
+
+        test_email = input("Enter test email address: ").strip()
+
+        if test_email:
+            try:
+                success = self.notification_system.send_email(
+                    test_email,
+                    "AI Math Tutor - Test Email",
+                    "This is a test email from AI Math Tutor system. If you receive this, the email system is working correctly!",
+                    "<h1>Test Email</h1><p>This is a test email from <strong>AI Math Tutor</strong> system.</p><p>If you receive this, the email system is working correctly!</p>"
+                )
+
+                if success:
+                    print("✅ Test email sent successfully!")
+                else:
+                    print("❌ Failed to send test email!")
+
+            except Exception as e:
+                print(f"❌ Email test failed: {e}")
+
+        input("\nPress Enter to continue...")
+
+
+def main():
+    """Main function to run the AI Math Tutor"""
+
+    # Configuration - Update these with your actual credentials
+    config = {
+        'moodle': {
+            'url': 'https://your-moodle-site.com',
+            'token': 'your-moodle-api-token'
+        },
+        'email': {
+            'smtp_server': 'smtp.gmail.com',
+            'smtp_port': 587,
+            'username': 'your-email@gmail.com',
+            'password': 'your-app-password'
+        }
+    }
+
+    # Initialize the application
+    app = MathTutorApp(config)
+
+    # Run the interactive session
+    try:
+        app.run_interactive_session()
+    except KeyboardInterrupt:
+        print("\n\nProgram interrupted by user. Goodbye! 👋")
+    except Exception as e:
+        print(f"\nAn error occurred: {e}")
+        print("Please contact support if this problem persists.")
+
+
+if __name__ == "__main__":
+    main()
