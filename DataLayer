@@ -1,0 +1,498 @@
+from sqlalchemy import (
+    create_engine, Column, String, Integer, Text, Boolean, 
+    DateTime, ForeignKey, Enum, Float, JSON, Table
+)
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import relationship, sessionmaker
+from datetime import datetime
+import enum
+
+# Database setup
+DATABASE_URL = "mysql+pymysql://username:password@localhost:3306/edulearn"
+engine = create_engine(DATABASE_URL, echo=True, pool_pre_ping=True)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Enums
+class SubjectEnum(enum.Enum):
+    PHYSICS = "physics"
+    CHEMISTRY = "chemistry"
+    MATHEMATICS = "mathematics"
+    BIOLOGY = "biology"
+
+class DifficultyEnum(enum.Enum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+class ContentTypeEnum(enum.Enum):
+    LESSON = "lesson"
+    EXERCISE = "exercise"
+    QUIZ = "quiz"
+    EXPERIMENT = "experiment"
+    SIMULATION = "simulation"
+
+class QuestionTypeEnum(enum.Enum):
+    MCQ = "mcq"
+    NUMERICAL = "numerical"
+    DESCRIPTIVE = "descriptive"
+    TRUE_FALSE = "true_false"
+
+# Association tables for many-to-many relationships
+quiz_questions = Table(
+    'quiz_questions',
+    Base.metadata,
+    Column('quiz_id', String(36), ForeignKey('quizzes.id', ondelete='CASCADE')),
+    Column('question_id', String(36), ForeignKey('questions.id', ondelete='CASCADE')),
+    Column('order', Integer, default=0)
+)
+
+user_achievements = Table(
+    'user_achievements',
+    Base.metadata,
+    Column('user_id', String(36), ForeignKey('users.id', ondelete='CASCADE')),
+    Column('achievement_id', String(36), ForeignKey('achievements.id', ondelete='CASCADE')),
+    Column('earned_at', DateTime, default=datetime.utcnow)
+)
+
+# Models
+class User(Base):
+    __tablename__ = 'users'
+    
+    id = Column(String(36), primary_key=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    username = Column(String(100), unique=True, nullable=False, index=True)
+    full_name = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    grade = Column(Integer, nullable=False)
+    profile_picture = Column(String(500), nullable=True)
+    bio = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    is_verified = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = Column(DateTime, nullable=True)
+    
+    # Relationships
+    progress = relationship('UserProgress', back_populates='user', cascade='all, delete-orphan')
+    quiz_attempts = relationship('QuizAttempt', back_populates='user', cascade='all, delete-orphan')
+    bookmarks = relationship('Bookmark', back_populates='user', cascade='all, delete-orphan')
+    notes = relationship('Note', back_populates='user', cascade='all, delete-orphan')
+    achievements = relationship('Achievement', secondary=user_achievements, back_populates='users')
+    
+    def __repr__(self):
+        return f"<User(username='{self.username}', email='{self.email}')>"
+
+
+class Topic(Base):
+    __tablename__ = 'topics'
+    
+    id = Column(String(36), primary_key=True)
+    subject = Column(Enum(SubjectEnum), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    grade = Column(Integer, nullable=False, index=True)
+    order = Column(Integer, nullable=False)
+    estimated_time = Column(Integer, nullable=False)  # in minutes
+    thumbnail = Column(String(500), nullable=True)
+    prerequisites = Column(JSON, nullable=True)  # List of topic IDs
+    is_published = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    lessons = relationship('Lesson', back_populates='topic', cascade='all, delete-orphan')
+    quizzes = relationship('Quiz', back_populates='topic', cascade='all, delete-orphan')
+    
+    def __repr__(self):
+        return f"<Topic(title='{self.title}', subject='{self.subject.value}')>"
+
+
+class Lesson(Base):
+    __tablename__ = 'lessons'
+    
+    id = Column(String(36), primary_key=True)
+    topic_id = Column(String(36), ForeignKey('topics.id', ondelete='CASCADE'), nullable=False)
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    content_type = Column(Enum(ContentTypeEnum), nullable=False)
+    difficulty = Column(Enum(DifficultyEnum), nullable=False)
+    order = Column(Integer, nullable=False)
+    estimated_time = Column(Integer, nullable=False)  # in minutes
+    
+    # Rich content
+    interactive_elements = Column(JSON, nullable=True)  # Interactive components
+    examples = Column(JSON, nullable=True)  # Worked examples
+    visualizations = Column(JSON, nullable=True)  # Image/video URLs
+    key_points = Column(JSON, nullable=True)  # Important takeaways
+    formulas = Column(JSON, nullable=True)  # Mathematical formulas
+    
+    video_url = Column(String(500), nullable=True)
+    thumbnail = Column(String(500), nullable=True)
+    is_published = Column(Boolean, default=False)
+    view_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    topic = relationship('Topic', back_populates='lessons')
+    questions = relationship('Question', back_populates='lesson', cascade='all, delete-orphan')
+    progress = relationship('UserProgress', back_populates='lesson', cascade='all, delete-orphan')
+    bookmarks = relationship('Bookmark', back_populates='lesson', cascade='all, delete-orphan')
+    notes = relationship('Note', back_populates='lesson', cascade='all, delete-orphan')
+    
+    def __repr__(self):
+        return f"<Lesson(title='{self.title}', type='{self.content_type.value}')>"
+
+
+class Question(Base):
+    __tablename__ = 'questions'
+    
+    id = Column(String(36), primary_key=True)
+    lesson_id = Column(String(36), ForeignKey('lessons.id', ondelete='CASCADE'), nullable=True)
+    question_text = Column(Text, nullable=False)
+    question_type = Column(Enum(QuestionTypeEnum), nullable=False)
+    
+    # MCQ specific
+    options = Column(JSON, nullable=True)  # List of options
+    
+    # Answer
+    correct_answer = Column(Text, nullable=False)
+    explanation = Column(Text, nullable=False)
+    
+    # Metadata
+    difficulty = Column(Enum(DifficultyEnum), nullable=False)
+    points = Column(Integer, default=10)
+    hints = Column(JSON, nullable=True)  # List of hints
+    image_url = Column(String(500), nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    lesson = relationship('Lesson', back_populates='questions')
+    quizzes = relationship('Quiz', secondary=quiz_questions, back_populates='questions')
+    
+    def __repr__(self):
+        return f"<Question(type='{self.question_type.value}', difficulty='{self.difficulty.value}')>"
+
+
+class Quiz(Base):
+    __tablename__ = 'quizzes'
+    
+    id = Column(String(36), primary_key=True)
+    topic_id = Column(String(36), ForeignKey('topics.id', ondelete='CASCADE'), nullable=False)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    time_limit = Column(Integer, nullable=False)  # in minutes
+    passing_score = Column(Integer, default=70)  # percentage
+    max_attempts = Column(Integer, default=3)
+    is_published = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    topic = relationship('Topic', back_populates='quizzes')
+    questions = relationship('Question', secondary=quiz_questions, back_populates='quizzes')
+    attempts = relationship('QuizAttempt', back_populates='quiz', cascade='all, delete-orphan')
+    
+    def __repr__(self):
+        return f"<Quiz(title='{self.title}')>"
+
+
+class QuizAttempt(Base):
+    __tablename__ = 'quiz_attempts'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    quiz_id = Column(String(36), ForeignKey('quizzes.id', ondelete='CASCADE'), nullable=False)
+    
+    score = Column(Integer, nullable=False)
+    total_points = Column(Integer, nullable=False)
+    percentage = Column(Float, nullable=False)
+    passed = Column(Boolean, nullable=False)
+    
+    time_taken = Column(Integer, nullable=False)  # in seconds
+    answers = Column(JSON, nullable=False)  # User's answers
+    results = Column(JSON, nullable=False)  # Detailed results
+    
+    started_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship('User', back_populates='quiz_attempts')
+    quiz = relationship('Quiz', back_populates='attempts')
+    
+    def __repr__(self):
+        return f"<QuizAttempt(score={self.score}, percentage={self.percentage})>"
+class UserProgress(Base):
+    __tablename__ = 'user_progress'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    lesson_id = Column(String(36), ForeignKey('lessons.id', ondelete='CASCADE'), nullable=False)
+    
+    completed = Column(Boolean, default=False)
+    score = Column(Integer, nullable=True)
+    time_spent = Column(Integer, default=0)  # in seconds
+    attempts = Column(Integer, default=0)
+    progress_percentage = Column(Float, default=0.0)
+    
+    first_accessed = Column(DateTime, default=datetime.utcnow)
+    last_accessed = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+    
+    # Relationships
+    user = relationship('User', back_populates='progress')
+    lesson = relationship('Lesson', back_populates='progress')
+    
+    def __repr__(self):
+        return f"<UserProgress(user_id='{self.user_id}', completed={self.completed})>"
+
+
+class Experiment(Base):
+    __tablename__ = 'experiments'
+    
+    id = Column(String(36), primary_key=True)
+    subject = Column(Enum(SubjectEnum), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    objective = Column(Text, nullable=False)
+    theory = Column(Text, nullable=False)
+    
+    materials = Column(JSON, nullable=False)  # List of materials needed
+    procedure = Column(JSON, nullable=False)  # Step-by-step procedure
+    safety_precautions = Column(JSON, nullable=False)  # Safety guidelines
+    observations = Column(Text, nullable=False)
+    conclusion = Column(Text, nullable=True)
+    
+    # Virtual lab
+    virtual_lab_link = Column(String(500), nullable=True)
+    simulation_data = Column(JSON, nullable=True)
+    
+    # Media
+    images = Column(JSON, nullable=True)  # List of image URLs
+    videos = Column(JSON, nullable=True)  # List of video URLs
+    
+    difficulty = Column(Enum(DifficultyEnum), nullable=False)
+    grade = Column(Integer, nullable=False)
+    estimated_time = Column(Integer, nullable=False)  # in minutes
+    is_published = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<Experiment(title='{self.title}', subject='{self.subject.value}')>"
+
+
+class Bookmark(Base):
+    __tablename__ = 'bookmarks'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    lesson_id = Column(String(36), ForeignKey('lessons.id', ondelete='CASCADE'), nullable=False)
+    
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship('User', back_populates='bookmarks')
+    lesson = relationship('Lesson', back_populates='bookmarks')
+    
+    def __repr__(self):
+        return f"<Bookmark(user_id='{self.user_id}', lesson_id='{self.lesson_id}')>"
+
+
+class Note(Base):
+    __tablename__ = 'notes'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    lesson_id = Column(String(36), ForeignKey('lessons.id', ondelete='CASCADE'), nullable=False)
+    
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    color = Column(String(7), default='#FFD700')  # Hex color code
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    user = relationship('User', back_populates='notes')
+    lesson = relationship('Lesson', back_populates='notes')
+    
+    def __repr__(self):
+        return f"<Note(title='{self.title}')>"
+
+
+class Achievement(Base):
+    __tablename__ = 'achievements'
+    
+    id = Column(String(36), primary_key=True)
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    icon = Column(String(500), nullable=True)
+    badge_color = Column(String(7), default='#FFD700')
+    
+    # Requirements
+    requirement_type = Column(String(50), nullable=False)  # lessons_completed, quiz_score, streak, etc.
+    requirement_value = Column(Integer, nullable=False)
+    
+    points = Column(Integer, default=100)
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    users = relationship('User', secondary=user_achievements, back_populates='achievements')
+    
+    def __repr__(self):
+        return f"<Achievement(title='{self.title}')>"
+
+
+class StudyStreak(Base):
+    __tablename__ = 'study_streaks'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False, unique=True)
+    
+    current_streak = Column(Integer, default=0)
+    longest_streak = Column(Integer, default=0)
+    last_study_date = Column(DateTime, nullable=True)
+    
+    total_study_days = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<StudyStreak(user_id='{self.user_id}', current={self.current_streak})>"
+
+
+class Discussion(Base):
+    __tablename__ = 'discussions'
+    
+    id = Column(String(36), primary_key=True)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    lesson_id = Column(String(36), ForeignKey('lessons.id', ondelete='CASCADE'), nullable=True)
+    
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    is_resolved = Column(Boolean, default=False)
+    upvotes = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    replies = relationship('DiscussionReply', back_populates='discussion', cascade='all, delete-orphan')
+    
+    def __repr__(self):
+        return f"<Discussion(title='{self.title}')>"
+
+
+class DiscussionReply(Base):
+    __tablename__ = 'discussion_replies'
+    
+    id = Column(String(36), primary_key=True)
+    discussion_id = Column(String(36), ForeignKey('discussions.id', ondelete='CASCADE'), nullable=False)
+    user_id = Column(String(36), ForeignKey('users.id', ondelete='CASCADE'), nullable=False)
+    
+    content = Column(Text, nullable=False)
+    is_solution = Column(Boolean, default=False)
+    upvotes = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    discussion = relationship('Discussion', back_populates='replies')
+    
+    def __repr__(self):
+        return f"<DiscussionReply(discussion_id='{self.discussion_id}')>"
+
+
+# Database utility functions
+def get_db():
+    """Dependency for FastAPI to get database session"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    """Initialize database - create all tables"""
+    Base.metadata.create_all(bind=engine)
+    print("Database tables created successfully!")
+
+
+def drop_db():
+    """Drop all tables - use with caution!"""
+    Base.metadata.drop_all(bind=engine)
+    print("Database tables dropped!")
+
+
+if __name__ == "__main__":
+    # Create all tables
+    init_db()
+    
+    # Example: Create a session and add sample data
+    from uuid import uuid4
+    import bcrypt
+    
+    db = SessionLocal()
+    
+    try:
+        # Create sample user
+        user_id = str(uuid4())
+        sample_user = User(
+            id=user_id,
+            email="student@example.com",
+            username="john_doe",
+            full_name="John Doe",
+            password_hash=bcrypt.hashpw("password123".encode(), bcrypt.gensalt()).decode(),
+            grade=11
+        )
+        db.add(sample_user)
+        
+        # Create sample topic
+        topic_id = str(uuid4())
+        sample_topic = Topic(
+            id=topic_id,
+            subject=SubjectEnum.PHYSICS,
+            title="Newton's Laws of Motion",
+            description="Understanding the fundamental laws that govern motion",
+            grade=11,
+            order=1,
+            estimated_time=60,
+            is_published=True
+        )
+        db.add(sample_topic)
+        
+        # Create sample lesson
+        lesson_id = str(uuid4())
+        sample_lesson = Lesson(
+            id=lesson_id,
+            topic_id=topic_id,
+            title="Newton's First Law - Law of Inertia",
+            content="An object at rest stays at rest and an object in motion stays in motion...",
+            content_type=ContentTypeEnum.LESSON,
+            difficulty=DifficultyEnum.MEDIUM,
+            order=1,
+            estimated_time=20,
+            key_points=["Inertia", "Objects resist changes in motion", "Mass affects inertia"],
+            is_published=True
+        )
+        db.add(sample_lesson)
+        
+        # Commit changes
+        db.commit()
+        print("Sample data added successfully!")
+        
+    except Exception as e:
+        print(f"Error: {e}")
+        db.rollback()
+    finally:
+        db.close()
